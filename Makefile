@@ -4,7 +4,7 @@ macosx:
 	clang -Wall -g -O2 -shared -undefined dynamic_lookup -o lvmjit.so lvm_jit.c -Ilua/
 
 linux:
-	gcc -Wall -g -O2 -shared -o lvmjit.so lvm_jit.c -Ilua/
+	gcc -Wall -g -O2 -fPIC -shared -o lvmjit.so lvm_jit.c -Ilua/
 
 lvmjit:
 	cd dynasm && luajit dynasm.lua -o ../lvm_x64.h ../lvm_x64.dasc
