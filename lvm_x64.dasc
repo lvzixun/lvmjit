@@ -1,0 +1,612 @@
+|.arch x64
+|.actionlist actions
+
+|.globals LVMJIT_CODE_
+static void* labels[LVMJIT_CODE__MAX];
+
+|.macro callee_save
+| push rbp
+| push rbx
+| push r12
+| push r13
+| push r14
+| push r15
+|.endmacro
+
+|.macro callee_restore
+| pop r15
+| pop r14
+| pop r13
+| pop r12
+| pop rbx
+| pop rbp
+| ret
+|.endmacro
+
+|.type LS, lua_State, rdi
+|.type CI, CallInfo,  rsi
+|.type PC, Instruction, rbx
+|.define TRAP, r10d
+|.type BASE, StackValue, r11
+|.type RA, StackValue, r12
+|.type RB, StackValue, r13
+|.type RC, StackValue, r14
+|.define TMP32, r14w
+|.define TMP64, r14
+|.define TMP2_64, r15
+|.define TMP_NUM1, xmm0
+|.define TMP_NUM2, xmm1
+|.define TMP_NUM3, xmm2
+
+|.macro _caller_save
+| push LS
+| push CI
+| push r10
+| push BASE
+|.endmacro
+
+|.macro _caller_restore
+| pop BASE
+| pop r10
+| pop CI
+| pop LS
+|.endmacro
+
+|.macro _lvmjit_floatforloop, ra
+| _caller_save
+| mov rsi, ra
+| mov64 rax, (uintptr_t)_lvmjit_floatforloop
+| call rax
+| _caller_restore
+|.endmacro
+
+|.macro call_lvmjit_forprep, ra
+| _caller_save
+| mov rsi, ra
+| mov64 rax, (uintptr_t)_lvmjit_forprep
+| call rax
+| _caller_restore
+|.endmacro
+
+|.macro call_luaT_trybinTM, p1, p2, res, event
+| _caller_save
+| mov rsi, p1
+| mov rdx, p2
+| mov rcx, res
+| mov r8, event
+| mov64 rax, (uintptr_t)luaT_trybinTM
+| call rax
+| _caller_restore
+|.endmacro
+
+|.macro call_luaD_hookcall
+| _caller_save
+| mov64 rax, (uintptr_t)luaD_hookcall
+| call rax
+| _caller_restore
+|.endmacro
+
+|.macro call_luaG_traceexec
+| _caller_save
+| mov rsi, PC
+| mov64 rax, (uintptr_t)luaG_traceexec
+| call rax
+| _caller_restore
+|.endmacro
+
+|.macro call_luaD_poscall, nres
+| _caller_save
+| mov rdx, nres
+| mov64 rax, (uintptr_t)luaD_poscall
+| call rax
+| _caller_restore
+|.endmacro
+
+|.macro call_luaF_close, status
+| _caller_save
+| mov rsi, BASE
+| mov rdx, status
+| mov64 rax, (uintptr_t)luaF_close
+| call rax
+| _caller_restore
+|.endmacro
+
+#define STACKVALUE_SZ sizeof(StackValue)
+#define STACKVALUE_POW 4
+|.macro inc_stackid, R1
+| add R1, STACKVALUE_SZ
+|.endmacro
+
+|.macro dec_stackid, R1
+| sub R1, STACKVALUE_SZ
+|.endmacro
+
+|.macro cnt_stackid, R1, R2
+| sub R1, R2
+| shr R1, STACKVALUE_POW
+|.endmacro
+
+|.macro sub_stackid, R1, VR2
+| shl VR2, STACKVALUE_POW
+| sub R1, VR2
+|.endmacro
+
+|.macro add_stackid, R1, VR2
+| shl VR2, STACKVALUE_POW
+| add R1, VR2
+|.endmacro
+
+static int
+_do_compile(lua_State* L, struct lvmjit_context* C, Proto* p) {
+    if(sizeof(Value) != 8 || STACKVALUE_SZ != 1<<STACKVALUE_POW ||
+       sizeof(lua_Integer) != 8 || sizeof(lua_Number) != 8) {
+        luaL_error(L, "invalid value szie");
+    }
+
+    TValue *k = p->k;
+
+    |.macro savestate
+    | savepc
+    | mov rax, LS->top
+    | mov CI->top, rax
+    |.endmacro
+
+    |.macro Protect, exp
+    | savestate
+    | exp
+    | updatetrap
+    |.endmacro
+    
+    |.macro savepc
+    | mov CI->u.l.savedpc, PC
+    |.endmacro
+
+    |.macro updatetrap
+    | mov TRAP, CI->u.l.trap
+    |.endmacro
+
+    |.macro updatebase
+    | mov BASE, CI->func
+    | inc_stackid, BASE
+    |.endmacro
+
+    |.macro updatestack
+    | cmp TRAP, 0
+    | je >1
+    | updatebase
+    | getRA, RA
+    |1:
+    |.endmacro
+
+    |.macro incpc
+    | add PC, sizeof(Instruction)
+    |.endmacro
+
+    |.macro addpc, V
+    | add PC, V*sizeof(Instruction)
+    |.endmacro
+
+    |.macro subpc, V
+    | sub PC, V*sizeof(Instruction)
+    |.endmacro
+    
+    |.macro getRV, O1
+    | add O1, (int)(ptrdiff_t)&(((StackValue *)0)->val)
+    |.endmacro
+
+    |.macro getRA_I, TR1, IV
+    | mov TR1, BASE
+    | add TR1, GETARG_A(IV)*STACKVALUE_SZ
+    |.endmacro
+
+    |.macro getRA, TR1
+    | mov TR1, BASE
+    | add TR1, GETARG_A(i)*STACKVALUE_SZ
+    |.endmacro
+
+    |.macro getRB, TR1
+    | mov TR1, BASE
+    | add TR1, GETARG_B(i)*STACKVALUE_SZ
+    |.endmacro
+
+    |.macro getRC, TR1
+    | mov TR1, BASE
+    | add TR1, GETARG_C(i)*STACKVALUE_SZ
+    |.endmacro
+
+    |.macro ivalue, O1, R1
+    | mov R1, O1->val.value_.i
+    |.endmacro
+
+    |.macro setobj2s, O1, O2
+    | mov rax, O2->value_.gc
+    | mov O1->val.value_.gc, rax
+    | mov al, O2->tt_
+    | mov byte O1->val.tt_,  al
+    |.endmacro
+
+    |.macro setobjs2s, O1, O2
+    | mov rax, O2->val.value_.gc
+    | mov O1->val.value_.gc, rax
+    | mov al, O2->val.tt_
+    | mov byte O1->val.tt_, al
+    |.endmacro
+
+    |.macro setivalue, O1, v
+    | mov qword O1->val.value_.i, v
+    | mov byte O1->val.tt_, LUA_VNUMINT
+    |.endmacro
+
+    |.macro setnilvalue, O1
+    | mov byte O1->val.tt_, LUA_VNIL
+    |.endmacro
+
+    |.macro setfltvalue, O1, RNUM1
+    | movd rax, RNUM1
+    | mov qword O1->val.value_.n, rax
+    | mov byte O1->val.tt_, LUA_VNUMFLT
+    |.endmacro
+
+    |.macro cmptype, O1, V
+    | cmp byte O1->val.tt_, V
+    |.endmacro
+
+    |.macro ttisinteger, O1
+    | cmptype, O1, LUA_VNUMINT
+    |.endmacro
+
+    |.macro ttisfloat, O1
+    | cmptype, O1, LUA_VNUMFLT
+    |.endmacro
+
+    |.macro l_addi, O1, O2
+    | add O1, O2
+    |.endmacro
+
+    |.macro luai_numadd, RNUM1, RNUM2
+    | addsd RNUM1, RNUM2
+    |.endmacro
+
+    |.macro tonumberns, O1, RT_RET1, RT_NUMR1
+    | xor RT_RET1, RT_RET1
+    | ttisfloat, O1
+    | jne >1
+    | mov RT_RET1, 1
+    | movd RT_NUMR1, qword O1->val.value_.n
+    | jmp >2
+    |1:
+    | ttisinteger, O1
+    | jne >2
+    | mov RT_RET1, 1
+    | cvtsi2sd RT_NUMR1, qword O1->val.value_.i
+    |2:
+    |.endmacro
+
+    |.macro op_arithf_aux, O1, O2, fop
+    | tonumberns, O1, rax, TMP_NUM1
+    | cmp rax, 0
+    | je >1
+    | tonumberns, O2, rax, TMP_NUM2
+    | cmp rax, 0
+    | je >1
+    | incpc
+    | fop, TMP_NUM1, TMP_NUM2
+    | setfltvalue, RA, TMP_NUM1
+    | jmp =>(label_op_mmbin_end)
+    |1:
+    |.endmacro
+
+    |.macro op_arith_aux, O1, O2, iop, fop
+    | ttisinteger, O1
+    | jne >1
+    | ttisinteger, O2
+    | jne >1
+    | mov O1, O1->val.value_.i
+    | mov O2, O2->val.value_.i
+    | incpc
+    | iop, O1, O2
+    | setivalue, RA, O1
+    | jmp =>(label_op_mmbin_end)
+    |1:
+    | op_arithf_aux, O1, O2, fop
+    |2:
+    |.endmacro
+
+    |.macro op_arith, iop, fop
+    | getRB, RB
+    | getRC, RC
+    | op_arith_aux, RB, RC, iop, fop
+    |.endmacro
+
+    |.macro vmfetch
+    | cmp TRAP, 0
+    | je >1
+    | call_luaG_traceexec
+    | mov TRAP, eax
+    | updatebase
+    |1:
+    | incpc
+    | getRA RA
+    |.endmacro
+
+    //----------------------  lvmjit compile begin ----------------------
+    | mov PC, CI->u.l.savedpc
+    | mov TRAP, LS->hookmask
+    | cmp TRAP, 0
+    | je >1
+    || if(p->is_vararg) {
+    |       mov TRAP, 0
+    || } else {
+    |      cmp PC, p->code
+    |      jne >2
+    |      call_luaD_hookcall
+    | 2:
+    | mov dword CI->u.l.trap, 1
+    || }
+    | 1:
+    | updatebase
+
+    unsigned int* op_labels = calloc(p->sizecode, sizeof(unsigned int));
+    #define set_labels(i) (\
+        assert(i>=0 && i<p->sizecode), \
+        dasm_growpc(Dst, ++maxpc), \
+        op_labels[i] = maxpc, maxpc-1 )
+
+    #define get_labels(i) (\
+        assert(i>=0 && i<p->sizecode),\
+        assert(op_labels[i]), \
+        (op_labels[i]-1) )
+
+    int idx = 0;
+    for(idx=0; idx< p->sizecode; idx++) {
+        Instruction i = p->code[idx];
+        int op = GET_OPCODE(i);
+        |
+        | vmfetch
+        | 
+        switch(op) {
+            case OP_MOVE: {
+            |
+            | getRB, RB
+            | setobjs2s, RA, RB
+            |
+            } break;
+
+            case OP_LOADI: {
+            lua_Integer b = GETARG_sBx(i);
+            |
+            | setivalue, RA, b
+            |
+            } break;
+
+            case OP_RETURN0: {
+            |
+            | cmp TRAP, 0
+            | je >1
+            | mov LS->top, RA
+            | savepc
+            | call_luaD_poscall, 0
+            | jmp >2
+            |1:
+            | mov TMP32, CI->nresults
+            | mov rax, CI->previous
+            | mov qword LS->ci, rax
+            | mov RA, BASE
+            | dec_stackid, RA
+            | mov LS->top, RA
+            |
+            |3:
+            | cmp TMP32, 0
+            | jle >4
+            | dec TMP32
+            | setnilvalue, RA
+            | inc_stackid, RA
+            | jmp >3
+            |4:
+            | mov LS->top, RA
+            |2:
+            |
+            | callee_restore
+            |
+            } break;
+
+            case OP_RETURN1: {
+            |
+            | cmp TRAP, 0
+            | je >1
+            | mov rax, RA
+            | inc rax
+            | mov LS->top, rax
+            | savepc
+            | call_luaD_poscall, 1
+            | jmp >5
+            |1:
+            | mov TMP32, CI->nresults
+            | mov rax, CI->previous
+            | mov LS->ci, rax
+            | cmp TMP32, 0
+            | jne >2
+            | mov rax, BASE
+            | dec_stackid, rax
+            | mov LS->top, rax
+            | jmp >5
+            |2:
+            | mov RB, BASE
+            | dec_stackid, RB
+            | setobjs2s, RB, RA
+            | mov LS->top, BASE
+            | mov RA, BASE
+            |3:
+            | dec TMP32
+            | cmp TMP32, 0
+            | jle >4
+            | setnilvalue, RA
+            | inc_stackid, RA
+            | jmp >3
+            |4:
+            | mov LS->top, RA
+            |5:
+            |
+            | callee_restore
+            |
+            } break;
+
+            case OP_RETURN: {
+            int n = GETARG_B(i) - 1; /* number of results */
+            int nparams1 = GETARG_C(i);
+            if(n<0) { /* not fixed? */
+                | mov RB, LS->top
+                | cnt_stackid, RB, RA
+            } else {
+                | mov RB, n
+            }
+            | savepc
+            if(TESTARG_k(i)) { /* may there be open upvalues? */
+                | mov rax, CI->top
+                | cmp LS->top, rax
+                | ja >1
+                | mov LS->top, rax
+                |1:
+                | call_luaF_close, LUA_OK
+                | updatetrap
+                | updatestack
+            }
+            if (nparams1) { /* vararg function? */
+                | xor TMP64, TMP64
+                | mov TMP32, CI->u.l.nextraargs
+                | add TMP32, nparams1
+                | mov rax, CI->func
+                | sub_stackid, rax, TMP64
+                | mov CI->func, rax
+            }
+            | mov rax, RA
+            | mov TMP2_64, RB
+            | add_stackid, rax, TMP2_64
+            | mov LS->top, rax
+            | call_luaD_poscall, RB
+            |
+            | callee_restore
+            } break;
+
+            case OP_ADD: {
+            unsigned int label_op_mmbin_end = set_labels(idx);
+            |
+            | op_arith, l_addi, luai_numadd
+            |
+            } break;
+
+            case OP_MMBIN: {
+            assert(idx-1>=0 && idx-1<p->sizecode);
+            Instruction pi = p->code[idx-1];
+            lua_assert(OP_ADD <= GET_OPCODE(pi) && GET_OPCODE(pi) <= OP_SHR);
+            TMS tm = (TMS)GETARG_C(i);
+            unsigned int label_op_mmbin_end = get_labels(idx-1);
+
+            |.macro do_op_mmbin
+            | getRV RA
+            | getRV RB
+            | call_luaT_trybinTM, RA, RB, RC, tm
+            |.endmacro
+
+            |
+            | getRB, RB
+            | getRA_I, RC, pi
+            | Protect, do_op_mmbin
+            |=>(label_op_mmbin_end):
+            |
+            } break;
+
+            case OP_FORPREP: {
+            unsigned int n = GETARG_Bx(i) + 1;
+            unsigned int label_op_forperp_end = set_labels(idx);
+            unsigned int label_op_forloop_end = set_labels(idx+n);
+
+            |
+            | savestate
+            | call_lvmjit_forprep, RA
+            | cmp eax, 0
+            | je >1
+            | addpc, n
+            | jmp =>(label_op_forloop_end)
+            |1:
+            | =>(label_op_forperp_end):
+            |
+            } break;
+
+            case OP_FORLOOP: {
+                int back = GETARG_Bx(i);
+                unsigned int label_op_forperp_end = get_labels(idx-back);
+                unsigned int label_op_forloop_end = get_labels(idx);
+
+                |.define loopcount, TMP64
+                |.define loopstep, TMP2_64
+                |.define loopidx, rcx
+
+                |.macro ivalue_s2v_by_ra, V, R1
+                | mov RB, RA
+                | add RB, V*STACKVALUE_SZ
+                | ivalue, RB, R1
+                |.endmacro
+
+                |
+                | mov RB, RA
+                | add, RB, 2*STACKVALUE_SZ
+                | ttisinteger, RB
+                | jne >1
+                | ivalue_s2v_by_ra, 1, loopcount
+                | cmp, loopcount, 0
+                | jna >2
+                | ivalue_s2v_by_ra, 2, loopstep
+                | ivalue, RA, loopidx
+                | dec loopcount
+                | mov RB, RA
+                | add, RB, 1*STACKVALUE_SZ
+                | mov qword RB->val.value_.i, loopcount
+                | add loopidx, loopstep
+                | mov qword RA->val.value_.i, loopidx
+                | add, RB, 2*STACKVALUE_SZ
+                | setivalue, RB, loopidx
+                | subpc, back
+                | updatetrap
+                | jmp =>(label_op_forperp_end)
+                |
+                |1:
+                | _lvmjit_floatforloop, RA
+                | cmp eax, 0
+                | je >2
+                | subpc, back
+                | updatetrap
+                | jmp =>(label_op_forperp_end)
+                |2:
+                | updatetrap
+                | =>(label_op_forloop_end):
+                |
+            } break;
+
+            case OP_LOADK: {
+            TValue *rb = k + GETARG_Bx(i);
+            |
+            | setobj2s, RA, rb
+            |
+            } break;
+
+            default: {
+                free(op_labels);
+                luaL_error(L, "Invalid opcode[%d]:%s", op, opnames[op]);
+            } break;
+        }
+    }
+
+    free(op_labels);
+    return 0;
+}
+
+static int
+_resolve_compile(lua_State* L, struct lvmjit_context* C, Proto* p) {
+    | callee_save
+    |
+    || _do_compile(L, C, p);
+    |
+    | callee_restore
+    return 0;
+}
