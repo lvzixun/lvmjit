@@ -15,7 +15,7 @@ cfunc(...)
 ~~~
 
 ### benchmark
-test lua case in `test.lua`
+test lua case in `test.lua` in my `3 GHz Intel Core i7` CPU
 
 ~~~.lua
 local function foo(a, b)
