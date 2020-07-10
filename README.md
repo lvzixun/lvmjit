@@ -47,3 +47,7 @@ end
 | `OP_FORLOOP` | YES |
 | `OP_LOADK` | YES |
 | `OTHER OPCODE` | NO |
+
+### linux platform
+
+instead  `LUAI_FUNC` macro `extern` of `__attribute__((visibility("internal"))) extern` in `luaconf.h`.
